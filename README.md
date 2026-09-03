@@ -1,4 +1,4 @@
-# xfq — 小番茄图片混淆的命令行
+# xfq-cli — 小番茄图片混淆的命令行
 
 群里流传的「小番茄混淆图」，一条命令解回来；也能反过来把图混淆了再发。批量、跨平台、输出无损 PNG。
 
@@ -18,11 +18,11 @@ xfq a.jpg -n               # 只算不写，看粗糙度变化
 依赖 Pillow + numpy，纯 Python，用 uv 管理，不用自己建 venv：
 
 ```bash
-uv tool install git+https://github.com/Miint-Sunny/xfq      # 或克隆后在仓库里 uv tool install .
+uv tool install git+https://github.com/Miint-Sunny/xfq-cli      # 或克隆后在仓库里 uv tool install .
 ```
 
 Windows 一样：装 uv → `uv tool install …` → `uv tool update-shell`，重开终端。通配符工具自己展开，
-老式 cmd 窗口符号自动降级（`XFQ_ASCII=1` / `0` 强制）。不想装就 `uvx --from git+https://github.com/Miint-Sunny/xfq xfq a.jpg`。
+老式 cmd 窗口符号自动降级（`XFQ_ASCII=1` / `0` 强制）。不想装就 `uvx --from git+https://github.com/Miint-Sunny/xfq-cli xfq a.jpg`。
 
 ## 它到底是什么
 
@@ -38,7 +38,7 @@ Windows 一样：装 uv → `uv tool install …` → `uv tool update-shell`，�
 曲线保持局部性，所以混淆后是色块糊成一片而不是纯噪点，经得起平台二压，社区拿它过审核。
 置换本身无损，但几乎所有网页版导出 JPEG，收到的图多半已经有损，解出来会有轻微色偏，这是源头的损失，不是解错。
 
-「大番茄」是带数字密码的变种（前两位移位轮数，后两位补边），已经有别的工具管，这里不做。
+「大番茄」是带数字密码的变种（前两位移位轮数，后两位补边），这里不做，哪天用得上再说。
 
 ## 兼容性
 

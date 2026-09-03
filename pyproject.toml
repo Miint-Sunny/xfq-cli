@@ -1,5 +1,5 @@
 [project]
-name = "xfq"
+name = "xfq-cli"
 version = "0.1.0"
 description = "小番茄图片混淆的命令行：解混淆 / 混淆，批量，输出 PNG"
 readme = "README.md"
@@ -15,7 +15,7 @@ dependencies = [
 xfq = "xfq.cli:main"
 
 [project.urls]
-Repository = "https://github.com/Miint-Sunny/xfq"
+Repository = "https://github.com/Miint-Sunny/xfq-cli"
 
 [dependency-groups]
 dev = ["pytest>=8"]
