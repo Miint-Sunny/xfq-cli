@@ -112,7 +112,7 @@ def process_one(src: Path, rel: Path, opts) -> tuple[bool, str]:
             # 30 张真图校准：解真混淆图比值 0.46–0.79（含过 JPEG90 的），解原图 1.41–2.17，阈值 1.0 两边都有余量
             if not opts.force:
                 return False, (f'{SYM["warn"]} {tag}   解完没变平滑（粗糙度 {before:.1f} → {after:.1f}），'
-                               f'看着不像小番茄混淆过的图，跳过；--force 硬写')
+                               f'看着不像小番茄混淆过的图，跳过；-f 硬写')
             note = f'（粗糙度 {before:.1f} → {after:.1f}，不像混淆图，已硬写）'
         if opts.dry_run:
             return True, f'· {tag}   [dry-run] {arr.shape[1]}×{arr.shape[0]} 粗糙度 {before:.1f} → {after:.1f}'
@@ -145,7 +145,7 @@ def main(argv=None) -> int:
     g.add_argument('-d', '--outdir', metavar='DIR', help='输出目录，目录输入时保留相对层级')
     ap.add_argument('--suffix', default=None, help='输出文件名后缀（默认解混淆 _dec、混淆 _enc）')
     ap.add_argument('--jpeg', nargs='?', const=95, type=int, metavar='质量', help='输出 JPEG 而不是 PNG（默认质量 95；混淆图发群时更像网页版出来的）')
-    ap.add_argument('--force', action='store_true', help='解完看着不像小番茄图也照写')
+    ap.add_argument('-f', '--force', action='store_true', help='解完看着不像小番茄图也照写')
     ap.add_argument('--overwrite', action='store_true', help='输出已存在时覆盖')
     ap.add_argument('-n', '--dry-run', action='store_true', help='只算不写')
     ap.add_argument('-y', '--yes', action='store_true', help='处理目录 / 通配符时不问 y/N')

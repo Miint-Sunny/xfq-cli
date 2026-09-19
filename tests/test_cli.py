@@ -32,7 +32,7 @@ def test_decode_refuses_unscrambled_unless_forced(tmp_path, capsys):
     smooth_png(src)
     assert main([str(src)]) == 1
     assert '不像小番茄' in capsys.readouterr().out and not (tmp_path / 'plain_dec.png').exists()
-    assert main([str(src), '--force']) == 0
+    assert main([str(src), '-f']) == 0                 # -f 是 --force 的缩写
     assert (tmp_path / 'plain_dec.png').exists()
 
 
