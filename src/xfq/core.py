@@ -1,13 +1,17 @@
 # -*- coding: utf-8 -*-
-"""小番茄图片混淆的算法本体。
+"""小番茄图片混淆算法。
 
-这不是加密，是像素置换：
-  1. 对 W×H 的图生成一条广义希尔伯特曲线（Gilbert 曲线），把所有像素按曲线顺序排成一维；
-  2. 整体循环移位 round((√5 − 1) / 2 × W × H) 个位置（黄金分割）；
-  3. 解混淆就是反向移位。
-没有密码，参数全由尺寸决定。曲线保持局部性，所以混淆后是色块糊成一片而不是纯噪点，经得起平台二压。
-算法和奇点站 hideImg1.html、iris10086/pic-scramble、PicEncrypt（TomatoScramble.java）、sd-image-sorter 一致，
-本文件按算法自己写，未复制任何一方代码。
+该算法是像素置换，不是加密：
+
+1. 为 W×H 的图像生成一条广义希尔伯特曲线（Gilbert 曲线），按曲线顺序将全部像素排成一维序列；
+2. 将序列整体循环移位 round((√5 − 1) / 2 × W × H) 个位置（黄金分割比）；
+3. 解混淆时反向移位。
+
+算法没有密钥，全部参数由图像尺寸决定。曲线具有局部性，混淆结果呈色块状而非随机噪点，
+因此能承受平台的有损压缩。
+
+与以下实现的结果一致：奇点站 hideImg1.html、iris10086/pic-scramble、PicEncrypt（TomatoScramble.java）、
+sd-image-sorter。本文件依据算法独立实现，未复制上述任何代码。
 """
 from __future__ import annotations
 
@@ -25,35 +29,35 @@ def _sign(v: int) -> int:
 
 
 def _generate2d(x: int, y: int, ax: int, ay: int, bx: int, by: int, width: int, out: list) -> None:
-    """Gilbert 曲线递归。out 里直接放线性下标 x + y*width。"""
+    """递归生成 Gilbert 曲线，将经过的像素以行优先线性下标（x + y × width）追加到 out。"""
     w = abs(ax + ay)
     h = abs(bx + by)
-    dax, day = _sign(ax), _sign(ay)          # 主方向单位向量
-    dbx, dby = _sign(bx), _sign(by)          # 正交方向单位向量
-    if h == 1:                               # 一行
+    dax, day = _sign(ax), _sign(ay)          # 主方向的单位向量
+    dbx, dby = _sign(bx), _sign(by)          # 正交方向的单位向量
+    if h == 1:                               # 单行
         for _ in range(w):
             out.append(x + y * width)
             x += dax
             y += day
         return
-    if w == 1:                               # 一列
+    if w == 1:                               # 单列
         for _ in range(h):
             out.append(x + y * width)
             x += dbx
             y += dby
         return
-    ax2, ay2 = ax // 2, ay // 2              # Python 的 // 就是 Math.floor，负数也对
+    ax2, ay2 = ax // 2, ay // 2              # Python 的 // 对负数同样向下取整，与 JS 的 Math.floor 一致
     bx2, by2 = bx // 2, by // 2
     w2 = abs(ax2 + ay2)
     h2 = abs(bx2 + by2)
-    if 2 * w > 3 * h:                        # 太扁：只切两段
+    if 2 * w > 3 * h:                        # 宽高比过大时只分为两段
         if (w2 % 2) and (w > 2):
             ax2 += dax
             ay2 += day
         _generate2d(x, y, ax2, ay2, bx, by, width, out)
         _generate2d(x + ax2, y + ay2, ax - ax2, ay - ay2, bx, by, width, out)
         return
-    if (h2 % 2) and (h > 2):                 # 标准：上一步、横一长段、下一步
+    if (h2 % 2) and (h > 2):                 # 一般情况：分为三段
         bx2 += dbx
         by2 += dby
     _generate2d(x, y, bx2, by2, ax2, ay2, width, out)
@@ -64,7 +68,7 @@ def _generate2d(x: int, y: int, ax: int, ay: int, bx: int, by: int, width: int, 
 
 @lru_cache(maxsize=16)
 def curve(width: int, height: int) -> np.ndarray:
-    """曲线顺序下的像素线性下标（行优先 x + y*width）。同尺寸的图只算一次。"""
+    """返回按曲线顺序排列的像素线性下标（行优先，x + y × width）。结果按尺寸缓存。"""
     if width <= 0 or height <= 0:
         return np.zeros(0, dtype=np.int64)
     out: list = []
@@ -76,18 +80,22 @@ def curve(width: int, height: int) -> np.ndarray:
 
 
 def offset(pixel_count: int) -> int:
-    """黄金分割偏移。用 floor(x + 0.5) 而不是 Python 的 round()：参考实现是 JS 的 Math.round。"""
+    """返回循环移位量。
+
+    使用 floor(x + 0.5) 而非 Python 的 round()：参考实现使用 JS 的 Math.round，
+    Python 的 round() 对 .5 采用银行家舍入，结果可能相差 1。
+    """
     return math.floor((math.sqrt(5) - 1) / 2 * pixel_count + 0.5)
 
 
 def permutation(width: int, height: int) -> tuple[np.ndarray, np.ndarray]:
-    """返回 (src, dst)：混淆时 out[dst[i]] = in[src[i]]，解混淆反过来。"""
+    """返回置换下标 (src, dst)。混淆时 out[dst[i]] = in[src[i]]，解混淆时方向相反。"""
     c = curve(width, height)
     return c, np.roll(c, -offset(c.size))
 
 
 def encode(arr: np.ndarray) -> np.ndarray:
-    """混淆。arr 是 (H, W, C) 或 (H, W) 的数组，逐像素整体搬动，通道数无所谓。"""
+    """混淆图像。arr 为 (H, W) 或 (H, W, C) 数组；按像素整体移动，与通道数无关。"""
     h, w = arr.shape[:2]
     src, dst = permutation(w, h)
     flat = arr.reshape(h * w, -1)
@@ -97,7 +105,7 @@ def encode(arr: np.ndarray) -> np.ndarray:
 
 
 def decode(arr: np.ndarray) -> np.ndarray:
-    """解混淆。"""
+    """解混淆图像，是 :func:`encode` 的逆运算。"""
     h, w = arr.shape[:2]
     src, dst = permutation(w, h)
     flat = arr.reshape(h * w, -1)
@@ -107,7 +115,10 @@ def decode(arr: np.ndarray) -> np.ndarray:
 
 
 def roughness(arr: np.ndarray) -> float:
-    """相邻像素平均差异。混淆过的图这个值很大，解对了会掉一个量级；用来判断「这图到底是不是小番茄」。"""
+    """返回相邻像素的平均差异（粗糙度），仅计算 RGB 通道。
+
+    混淆图像的粗糙度较高，正确解混淆后明显下降。命令行据此判断输入是否为小番茄混淆图。
+    """
     a = arr.astype(np.int16)
     if a.ndim == 3:
         a = a[:, :, :3]

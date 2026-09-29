@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""算法：和参考站字节级一致；混淆 → 解混淆恒等；各种奇怪尺寸。"""
+"""算法：与参考实现逐字节一致；混淆后解混淆可还原；边界尺寸。"""
 import base64
 import json
 from pathlib import Path
@@ -9,8 +9,8 @@ import pytest
 
 from xfq.core import curve, decode, encode, offset, roughness
 
-# 黄金向量来自 Rinne414/sd-image-sorter（MIT）：用参考站原版 JS 在 node 里跑出的字节级结果。
-# 密码为空的那些 = step 1、无补边 = 小番茄。
+# 参考数据来自 Rinne414/sd-image-sorter（MIT），由参考网页的原版 JS 在 Node.js 中生成。
+# 密码为空的用例（step 为 1、无补边）即小番茄算法。
 GOLDEN = json.loads((Path(__file__).parent / 'assets' / 'reference_golden.json').read_text('utf-8'))
 CASES = [c for c in GOLDEN['pixel_cases'] if c['password'] == '']
 
@@ -42,7 +42,7 @@ def test_offset_is_js_math_round():
 
 
 def test_roughness_drops_after_decode():
-    # 用低频噪声当「自然图」：纯渐变太平滑，Gilbert 曲线保持局部性，混淆后也不怎么粗糙
+    # 以低频噪声模拟自然图像。纯渐变过于平滑：Gilbert 曲线具有局部性，混淆后粗糙度变化不明显
     rng = np.random.default_rng(0)
     small = rng.integers(0, 256, (6, 8, 3), dtype=np.uint8)
     from PIL import Image

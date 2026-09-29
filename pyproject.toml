@@ -1,7 +1,7 @@
 [project]
 name = "xfq-cli"
 version = "0.1.0"
-description = "小番茄图片混淆的命令行：解混淆 / 混淆，批量，输出 PNG"
+description = "小番茄图片混淆的命令行工具：批量混淆与解混淆，输出无损 PNG"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]

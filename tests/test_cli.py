@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""命令行：解 / 混 / 目录确认 / 通配符 / 不像混淆图时跳过。"""
+"""命令行：混淆与解混淆、目录确认、通配符展开、非混淆图的跳过。"""
 import numpy as np
 import pytest
 from PIL import Image
@@ -30,9 +30,9 @@ def test_encode_then_decode_files(tmp_path):
 def test_decode_refuses_unscrambled_unless_forced(tmp_path, capsys):
     src = tmp_path / 'plain.png'
     smooth_png(src)
-    assert main([str(src)]) == 1
-    assert '不像小番茄' in capsys.readouterr().out and not (tmp_path / 'plain_dec.png').exists()
-    assert main([str(src), '-f']) == 0                 # -f 是 --force 的缩写
+    assert main([str(src)]) == 0                       # 跳过不计为失败
+    assert '可能不是小番茄混淆图' in capsys.readouterr().out and not (tmp_path / 'plain_dec.png').exists()
+    assert main([str(src), '-f']) == 0                 # -f 为 --force 的短选项
     assert (tmp_path / 'plain_dec.png').exists()
 
 
@@ -54,13 +54,13 @@ def test_folder_confirm_and_outdir(tmp_path, monkeypatch, capsys):
     d.mkdir()
     for n in ('a.png', 'b.png'):
         arr = smooth_png(d / n)
-        Image.fromarray(encode(arr)).save(d / n)              # 存混淆好的
+        Image.fromarray(encode(arr)).save(d / n)              # 保存为混淆图
     monkeypatch.setattr('builtins.input', lambda _p: 'n')
     assert main([str(d), '-d', str(tmp_path / 'out')]) == 1
     assert '已取消' in capsys.readouterr().out
     monkeypatch.setattr('builtins.input', lambda _p: 'y')
     assert main([str(d), '-d', str(tmp_path / 'out')]) == 0
     assert sorted(p.name for p in (tmp_path / 'out').iterdir()) == ['a_dec.png', 'b_dec.png']
-    monkeypatch.setattr('builtins.input', lambda _p: pytest.fail('不该问'))
-    assert main([str(d / '*.png'), '-y', '-d', str(tmp_path / 'out2')]) == 0   # 通配符原样传进来
+    monkeypatch.setattr('builtins.input', lambda _p: pytest.fail('不应请求确认'))
+    assert main([str(d / '*.png'), '-y', '-d', str(tmp_path / 'out2')]) == 0   # 通配符未经 shell 展开，由程序展开
     assert (tmp_path / 'out2' / 'a_dec.png').exists()
