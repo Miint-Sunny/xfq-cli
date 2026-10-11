@@ -14,6 +14,8 @@ from PIL import Image
 from . import __version__
 from .argparse_zh import ArgumentParser
 from .core import decode, encode, roughness
+from .trash import move_to_trash
+from .trash import supported as trash_supported
 
 Image.MAX_IMAGE_PIXELS = None
 IMG_EXTS = {'.png', '.jpg', '.jpeg', '.webp', '.bmp', '.gif', '.tif', '.tiff'}
@@ -120,8 +122,18 @@ def load_pixels(im: Image.Image) -> np.ndarray:
     return np.asarray(im.convert('RGBA' if has_alpha else 'RGB'))
 
 
+def _overwrite_text(dst: Path, done: bool) -> str:
+    """覆盖已有输出文件时的说明。支持废纸篓的系统先将被覆盖的文件移到废纸篓，其他系统直接覆盖。"""
+    if trash_supported():
+        return f'被覆盖的 {dst.name} {"已" if done else "将"}移到废纸篓'
+    return f'{"已" if done else "将"}覆盖 {dst.name}'
+
+
 def process_one(src: Path, rel: Path, opts) -> tuple[str, str]:
     """处理单个文件。
+
+    结果先写入同目录的临时文件，再移到输出路径。使用 --overwrite 覆盖已有文件时，被覆盖的文件先移到废纸篓，
+    移动失败则不覆盖；不支持废纸篓的系统上直接覆盖。
 
     Returns:
         (status, line)：status 为 ``ok``、``skip`` 或 ``fail``；line 为报告行。
@@ -129,8 +141,11 @@ def process_one(src: Path, rel: Path, opts) -> tuple[str, str]:
     name = src.name
     dst = output_path(src, rel, opts)
     tag = f'{name} → {dst if opts.output or opts.outdir else dst.name}'
+    if dst.is_dir():
+        return 'fail', f'{SYM["bad"]} {name}  输出路径是目录：{dst}'
     if dst.exists() and not opts.overwrite:
         return 'skip', f'· {name}  已跳过：输出文件 {dst.name} 已存在（使用 --overwrite 覆盖）'
+    tmp = None
     try:
         with Image.open(src) as im:
             im.load()
@@ -150,7 +165,8 @@ def process_one(src: Path, rel: Path, opts) -> tuple[str, str]:
             note = '（注意：粗糙度未下降，输入可能不是小番茄混淆图，已按 -f 写出）'
         size = f'{arr.shape[1]}×{arr.shape[0]}'
         if opts.dry_run:
-            return 'ok', f'· {tag}  [试运行] {size}；{change}{note}'
+            replace_plan = f'；{_overwrite_text(dst, done=False)}' if dst.exists() else ''
+            return 'ok', f'· {tag}  [试运行] {size}；{change}{replace_plan}{note}'
         dst.parent.mkdir(parents=True, exist_ok=True)
         result = Image.fromarray(out)
         tmp = dst.with_name(dst.name + '.tmp~')
@@ -158,11 +174,29 @@ def process_one(src: Path, rel: Path, opts) -> tuple[str, str]:
             result.convert('RGB').save(tmp, format='JPEG', quality=opts.jpeg, subsampling=0)
         else:
             result.save(tmp, format='PNG')
-        os.replace(tmp, dst)
+        replacing = os.path.lexists(dst)
+        if replacing and not opts.overwrite:     # 处理期间出现了同名文件：未指定 --overwrite 时不覆盖
+            return 'skip', f'· {name}  已跳过：输出文件 {dst.name} 已存在（使用 --overwrite 覆盖）'
+        if replacing and trash_supported():      # 覆盖前先将被覆盖的文件移到废纸篓，移动失败则不覆盖
+            try:
+                move_to_trash(dst)
+            except OSError as e:
+                return 'fail', f'{SYM["bad"]} {tag}  无法将被覆盖的 {dst.name} 移到废纸篓：{e}；未覆盖{note}'
+        try:
+            os.replace(tmp, dst)
+        except OSError as e:
+            if replacing and trash_supported():
+                return 'fail', f'{SYM["bad"]} {tag}  被覆盖的 {dst.name} 已移到废纸篓，但写入失败：{e}；可从废纸篓恢复'
+            raise
+        tmp = None
+        replaced = f'；{_overwrite_text(dst, done=True)}' if replacing else ''
         what = '已混淆' if opts.encode else '已解混淆'
-        return 'ok', f'{SYM["ok"]} {tag}  {what} {size}；{change}；{fmt_size(dst.stat().st_size)}{note}'
+        return 'ok', f'{SYM["ok"]} {tag}  {what} {size}；{change}{replaced}；{fmt_size(dst.stat().st_size)}{note}'
     except Exception as e:
         return 'fail', f'{SYM["bad"]} {name}  处理失败：{e}'
+    finally:
+        if tmp is not None and tmp.exists():     # 只清理本次创建的临时文件
+            tmp.unlink()
 
 
 def summary(counts: Counter) -> str:
@@ -206,7 +240,8 @@ def build_parser() -> ArgumentParser:
     g.add_argument('--suffix', metavar='SUFFIX', help='输出文件名后缀（默认：解混淆为 _dec，混淆为 _enc）')
     g.add_argument('--jpeg', nargs='?', const=95, type=int, metavar='QUALITY',
                    help='输出 JPEG 而非 PNG，QUALITY 取值 1–100（默认：95）')
-    g.add_argument('--overwrite', action='store_true', help='覆盖已存在的输出文件（默认：跳过）')
+    g.add_argument('--overwrite', action='store_true',
+                   help='覆盖已存在的输出文件，被覆盖的文件先移到废纸篓；不支持废纸篓的系统上直接覆盖（默认：跳过）')
 
     g = ap.add_argument_group('其他')
     g.add_argument('-h', '--help', action='help', help='显示此帮助信息并退出')
@@ -238,6 +273,8 @@ def main(argv=None) -> int:
         kinds = '、'.join(f'{k} {n}' for k, n in ext.most_common())
         mode = '混淆' if a.encode else '解混淆'
         dest = f'输出到目录 {a.outdir}' if a.outdir else '输出到源文件所在目录'
+        if a.overwrite:
+            dest += '；覆盖已存在的输出文件' + ('，被覆盖的文件先移到废纸篓' if trash_supported() else '')
         print(f"{'、'.join(batch)}：共 {len(items)} 个文件（{kinds}），{mode}，{dest}")
         if not confirm('是否继续？[y/N] '):
             print('已取消')
