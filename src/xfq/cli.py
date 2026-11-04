@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from . import __version__
+from . import __version__, metadata
 from .argparse_zh import ArgumentParser
 from .core import decode, encode, roughness
 from .trash import move_to_trash
@@ -133,7 +133,7 @@ def process_one(src: Path, rel: Path, opts) -> tuple[str, str]:
     """处理单个文件。
 
     结果先写入同目录的临时文件，再移到输出路径。使用 --overwrite 覆盖已有文件时，被覆盖的文件先移到废纸篓，
-    移动失败则不覆盖；不支持废纸篓的系统上直接覆盖。
+    移动失败则不覆盖；不支持废纸篓的系统上直接覆盖。输出默认不含元数据，使用 --original 时保留输入图片的元数据。
 
     Returns:
         (status, line)：status 为 ``ok``、``skip`` 或 ``fail``；line 为报告行。
@@ -150,6 +150,7 @@ def process_one(src: Path, rel: Path, opts) -> tuple[str, str]:
         with Image.open(src) as im:
             im.load()
             arr = load_pixels(im)
+            meta = metadata.read(im) if opts.original else None
         before = roughness(arr)
         out = encode(arr) if opts.encode else decode(arr)
         after = roughness(out)
@@ -164,16 +165,23 @@ def process_one(src: Path, rel: Path, opts) -> tuple[str, str]:
                                 f'输入可能不是小番茄混淆图（使用 -f 仍写出）')
             note = '（注意：粗糙度未下降，输入可能不是小番茄混淆图，已按 -f 写出）'
         size = f'{arr.shape[1]}×{arr.shape[0]}'
+        save_kw, kept = {}, ''
+        if meta is not None:
+            save_kw, dropped = metadata.save_options(meta, 'JPEG' if opts.jpeg is not None else 'PNG')
+            items = [x for x in meta.items() if x not in dropped]
+            kept = f'；已保留元数据：{"、".join(items)}' if items else '；输入图片没有可保留的元数据'
+            if dropped:
+                note += f'（注意：JPEG 不支持 PNG 文本块，未保留{"、".join(dropped)}）'
         if opts.dry_run:
             replace_plan = f'；{_overwrite_text(dst, done=False)}' if dst.exists() else ''
-            return 'ok', f'· {tag}  [试运行] {size}；{change}{replace_plan}{note}'
+            return 'ok', f'· {tag}  [试运行] {size}；{change}{kept.replace("已保留", "将保留", 1)}{replace_plan}{note}'
         dst.parent.mkdir(parents=True, exist_ok=True)
         result = Image.fromarray(out)
         tmp = dst.with_name(dst.name + '.tmp~')
         if opts.jpeg is not None:
-            result.convert('RGB').save(tmp, format='JPEG', quality=opts.jpeg, subsampling=0)
+            result.convert('RGB').save(tmp, format='JPEG', quality=opts.jpeg, subsampling=0, **save_kw)
         else:
-            result.save(tmp, format='PNG')
+            result.save(tmp, format='PNG', **save_kw)
         replacing = os.path.lexists(dst)
         if replacing and not opts.overwrite:     # 处理期间出现了同名文件：未指定 --overwrite 时不覆盖
             return 'skip', f'· {name}  已跳过：输出文件 {dst.name} 已存在（使用 --overwrite 覆盖）'
@@ -191,7 +199,7 @@ def process_one(src: Path, rel: Path, opts) -> tuple[str, str]:
         tmp = None
         replaced = f'；{_overwrite_text(dst, done=True)}' if replacing else ''
         what = '已混淆' if opts.encode else '已解混淆'
-        return 'ok', f'{SYM["ok"]} {tag}  {what} {size}；{change}{replaced}；{fmt_size(dst.stat().st_size)}{note}'
+        return 'ok', f'{SYM["ok"]} {tag}  {what} {size}；{change}{kept}{replaced}；{fmt_size(dst.stat().st_size)}{note}'
     except Exception as e:
         return 'fail', f'{SYM["bad"]} {name}  处理失败：{e}'
     finally:
@@ -216,6 +224,7 @@ EPILOG = f'''\
   xfq -e a.png               混淆，输出 a_enc.png
   xfq -r ./in -d ./out       递归处理目录，结果写入 ./out
   xfq -e *.png --jpeg        混淆并输出 JPEG（质量 95）
+  xfq -e a.png -o            混淆并保留原图的元数据
   xfq a.jpg -n               试运行，只报告粗糙度变化
 
 文档：{REPO_URL}'''
@@ -225,7 +234,7 @@ def build_parser() -> ArgumentParser:
     ap = ArgumentParser(
         prog='xfq',
         description='小番茄图片混淆的命令行工具。默认对输入图片解混淆，使用 -e 时进行混淆。\n'
-                    '默认输出无损 PNG；输入为目录或通配符时，处理前请求确认。',
+                    '默认输出无损 PNG，不含输入图片的元数据；输入为目录或通配符时，处理前请求确认。',
         epilog=EPILOG, add_help=False)
     ap.add_argument('paths', nargs='*', metavar='PATH', help='图片文件或目录，支持通配符')
 
@@ -235,8 +244,10 @@ def build_parser() -> ArgumentParser:
 
     g = ap.add_argument_group('输出')
     dest = g.add_mutually_exclusive_group()
-    dest.add_argument('-o', '--output', metavar='FILE', help='输出文件，仅适用于单个输入文件')
+    dest.add_argument('-O', '--output', metavar='FILE', help='输出文件，仅适用于单个输入文件')
     dest.add_argument('-d', '--outdir', metavar='DIR', help='输出目录；输入为目录时保留相对路径')
+    g.add_argument('-o', '--original', action='store_true',
+                   help='保留原图（输入图片）的元数据：文本块、EXIF、XMP、ICC 色彩配置文件、DPI 和 JPEG 注释（默认：不保留）')
     g.add_argument('--suffix', metavar='SUFFIX', help='输出文件名后缀（默认：解混淆为 _dec，混淆为 _enc）')
     g.add_argument('--jpeg', nargs='?', const=95, type=int, metavar='QUALITY',
                    help='输出 JPEG 而非 PNG，QUALITY 取值 1–100（默认：95）')
@@ -264,7 +275,7 @@ def main(argv=None) -> int:
         error('未找到图片文件', '使用 xfq -h 查看用法')
         return 1
     if a.output and len(items) > 1:
-        error('-o 只能用于单个输入文件', '处理多个文件时，使用 -d DIR 指定输出目录')
+        error('-O 只能用于单个输入文件', '处理多个文件时，使用 -d DIR 指定输出目录')
         return 1
     # 目录与通配符属于批量操作，处理前请求确认；逐个指定的文件不确认
     batch = [p for p in a.paths if Path(p).is_dir() or any(ch in p for ch in GLOB_CHARS)]

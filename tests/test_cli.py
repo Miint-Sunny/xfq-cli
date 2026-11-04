@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-"""命令行：混淆与解混淆、目录确认、通配符展开、非混淆图的跳过、覆盖已有文件。"""
+"""命令行：混淆与解混淆、目录确认、通配符展开、非混淆图的跳过、覆盖已有文件、保留原图元数据（-o）。"""
 import os
 
 import numpy as np
 import pytest
 from PIL import Image
+from PIL.PngImagePlugin import PngInfo
 
 import xfq.cli as cli
 from xfq.cli import main
@@ -26,7 +27,7 @@ def test_encode_then_decode_files(tmp_path):
     assert np.array_equal(np.asarray(Image.open(enc)), encode(arr))
     assert main([str(enc)]) == 0
     assert np.array_equal(np.asarray(Image.open(tmp_path / 'a_enc_dec.png')), arr)
-    assert main([str(enc), '-o', str(tmp_path / 'back.png'), '--overwrite']) == 0
+    assert main([str(enc), '-O', str(tmp_path / 'back.png'), '--overwrite']) == 0
     assert (tmp_path / 'back.png').exists()
 
 
@@ -47,7 +48,7 @@ def test_jpeg_output_and_alpha(tmp_path):
     assert main(['-e', str(src)]) == 0
     with Image.open(tmp_path / 'rgba_enc.png') as im:
         assert im.mode == 'RGBA'
-    assert main(['-e', str(src), '--jpeg', '90', '-o', str(tmp_path / 'e.jpg')]) == 0
+    assert main(['-e', str(src), '--jpeg', '90', '-O', str(tmp_path / 'e.jpg')]) == 0
     with Image.open(tmp_path / 'e.jpg') as im:
         assert im.format == 'JPEG' and im.mode == 'RGB'
 
@@ -117,7 +118,7 @@ def test_output_directory_is_never_overwritten(tmp_path, no_system_trash):
     d = tmp_path / 'out.png'
     d.mkdir()
     (d / 'keep.txt').write_text('keep', 'utf-8')
-    assert main(['-e', str(src), '-o', str(d), '--overwrite']) == 1     # 输出路径是目录：报错，目录不动
+    assert main(['-e', str(src), '-O', str(d), '--overwrite']) == 1     # 输出路径是目录：报错，目录不动
     assert (d / 'keep.txt').exists() and not list(no_system_trash.iterdir())
 
 
@@ -131,3 +132,81 @@ def test_real_system_trash(tmp_path):
     smooth_png(f)
     move_to_trash(f)
     assert not f.exists()
+
+
+# ---------------------------------------------------------------- 原图元数据（-o, --original）
+ICC = b'test-icc-profile'
+
+
+def png_with_metadata(path):
+    """生成带文本块、EXIF、ICC、DPI 的 PNG，模拟 NovelAI 出图。"""
+    arr = smooth_png(path)
+    info = PngInfo()
+    info.add_text('Software', 'NovelAI')
+    info.add_text('Comment', '{"prompt": "1girl, 杂鱼~♥"}')            # 含非 Latin-1 字符，写为 iTXt
+    exif = Image.Exif()
+    exif[0x0131] = 'NovelAI Diffusion V5 0ADF9AB7'
+    Image.fromarray(arr).save(path, pnginfo=info, exif=exif.tobytes(), icc_profile=ICC, dpi=(300, 300))
+    return arr
+
+
+def metadata_of(path):
+    with Image.open(path) as im:
+        im.load()
+        return {'texts': dict(getattr(im, 'text', {}) or {}), 'exif': im.getexif().get(0x0131),
+                'icc': im.info.get('icc_profile'), 'dpi': im.info.get('dpi')}
+
+
+def test_output_has_no_metadata_by_default(tmp_path):
+    src = tmp_path / 'a.png'
+    png_with_metadata(src)
+    assert main(['-e', str(src)]) == 0
+    m = metadata_of(tmp_path / 'a_enc.png')
+    assert not m['texts'] and m['exif'] is None and m['icc'] is None and m['dpi'] is None
+
+
+def test_original_keeps_metadata_png(tmp_path, capsys):
+    src = tmp_path / 'a.png'
+    arr = png_with_metadata(src)
+    assert main(['-e', str(src), '-o']) == 0
+    enc = tmp_path / 'a_enc.png'
+    m = metadata_of(enc)
+    assert m['texts'] == {'Software': 'NovelAI', 'Comment': '{"prompt": "1girl, 杂鱼~♥"}'}
+    assert m['exif'] == 'NovelAI Diffusion V5 0ADF9AB7' and m['icc'] == ICC
+    assert [round(x) for x in m['dpi']] == [300, 300]
+    assert '已保留元数据：文本块 ×2、EXIF、ICC 色彩配置文件、DPI' in capsys.readouterr().out
+    assert main([str(enc), '--original']) == 0                          # 解混淆时同样保留，元数据完整往返
+    dec = tmp_path / 'a_enc_dec.png'
+    assert metadata_of(dec)['texts'] == m['texts'] and np.array_equal(np.asarray(Image.open(dec)), arr)
+
+
+def test_original_to_jpeg_drops_png_text_chunks(tmp_path, capsys):
+    src = tmp_path / 'a.png'
+    png_with_metadata(src)
+    assert main(['-e', str(src), '-o', '--jpeg']) == 0
+    m = metadata_of(tmp_path / 'a_enc.jpg')
+    assert m['exif'] == 'NovelAI Diffusion V5 0ADF9AB7' and m['icc'] == ICC
+    out = capsys.readouterr().out
+    assert '已保留元数据：EXIF、ICC 色彩配置文件、DPI' in out and 'JPEG 不支持 PNG 文本块，未保留文本块 ×2' in out
+
+
+def test_original_from_jpeg(tmp_path, capsys):
+    src = tmp_path / 'a.jpg'
+    arr = smooth_png(tmp_path / 'tmp.png')
+    exif = Image.Exif()
+    exif[0x010E] = 'jpeg description'
+    Image.fromarray(encode(arr)).save(src, quality=95, exif=exif.tobytes(), icc_profile=ICC, comment=b'jpeg comment')
+    assert main([str(src), '-o', '-f']) == 0                            # 解混淆为 PNG，JPEG 注释改存为 Comment 文本块
+    m = metadata_of(tmp_path / 'a_dec.png')
+    assert m['icc'] == ICC and m['texts'].get('Comment') == 'jpeg comment'
+    with Image.open(tmp_path / 'a_dec.png') as im:
+        assert im.getexif().get(0x010E) == 'jpeg description'
+
+
+def test_short_o_is_original_and_capital_o_is_output(tmp_path, capsys):
+    src = tmp_path / 'a.png'
+    png_with_metadata(src)
+    assert main(['-e', str(src), '-o', '-O', str(tmp_path / 'x.png')]) == 0
+    assert metadata_of(tmp_path / 'x.png')['texts']                     # -O 指定输出文件，-o 保留元数据
+    assert main(['-e', str(src), '-n', '-o']) == 0                      # 试运行：报告将保留的元数据
+    assert '将保留元数据：文本块 ×2' in capsys.readouterr().out
