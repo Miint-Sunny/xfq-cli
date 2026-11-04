@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
-"""命令行：混淆与解混淆、目录确认、通配符展开、非混淆图的跳过、覆盖已有文件、保留原图元数据（-o）。"""
+"""命令行：混淆与解混淆、目录确认、通配符展开、非混淆图的跳过、覆盖已有文件、元数据与 LSB 隐写（-o）。"""
+import gzip
+import json
 import os
 
 import numpy as np
@@ -9,7 +11,8 @@ from PIL.PngImagePlugin import PngInfo
 
 import xfq.cli as cli
 from xfq.cli import main
-from xfq.core import encode
+from xfq import stealth
+from xfq.core import decode, encode
 
 
 def smooth_png(path, w=96, h=64):
@@ -187,7 +190,7 @@ def test_original_to_jpeg_drops_png_text_chunks(tmp_path, capsys):
     m = metadata_of(tmp_path / 'a_enc.jpg')
     assert m['exif'] == 'NovelAI Diffusion V5 0ADF9AB7' and m['icc'] == ICC
     out = capsys.readouterr().out
-    assert '已保留元数据：EXIF、ICC 色彩配置文件、DPI' in out and 'JPEG 不支持 PNG 文本块，未保留文本块 ×2' in out
+    assert '已保留元数据：EXIF、ICC 色彩配置文件、DPI' in out and 'JPEG 输出无法保留文本块 ×2' in out
 
 
 def test_original_from_jpeg(tmp_path, capsys):
@@ -210,3 +213,58 @@ def test_short_o_is_original_and_capital_o_is_output(tmp_path, capsys):
     assert metadata_of(tmp_path / 'x.png')['texts']                     # -O 指定输出文件，-o 保留元数据
     assert main(['-e', str(src), '-n', '-o']) == 0                      # 试运行：报告将保留的元数据
     assert '将保留元数据：文本块 ×2' in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------- LSB 隐写：默认清除，-o 保留
+def nai_like_rgba(path):
+    """生成 alpha 通道带 NovelAI 格式隐写的 RGBA PNG，返回像素数组。"""
+    arr = np.dstack([smooth_png(path), np.full((64, 96), 255, np.uint8)])
+    data = gzip.compress(json.dumps({'Comment': '{"prompt": "1girl"}'}).encode())
+    payload = b'stealth_pngcomp' + (len(data) * 8).to_bytes(4, 'big') + data + b'\xff\xff\xff\xff'
+    bits = np.unpackbits(np.frombuffer(payload, np.uint8))
+    idx = np.arange(bits.size)
+    arr[idx % 64, idx // 64, 3] = (arr[idx % 64, idx // 64, 3] & 0xFE) | bits      # 列优先，与 NovelAI 一致
+    Image.fromarray(arr).save(path)
+    return arr
+
+
+def test_stealth_removed_by_default(tmp_path, capsys):
+    src = tmp_path / 'a.png'
+    arr = nai_like_rgba(src)
+    assert stealth.find(arr) is not None
+    assert main(['-e', str(src)]) == 0
+    assert '已移除 LSB 隐写（alpha+gzip' in capsys.readouterr().out
+    plain = decode(np.asarray(Image.open(tmp_path / 'a_enc.png')))   # 任何人解混淆后都读不到隐写
+    assert stealth.find(plain) is None and (plain[..., 3] == 255).all()
+    assert np.array_equal(plain[..., :3], arr[..., :3])                 # RGB 不变
+
+
+def test_stealth_in_scrambled_input_removed_when_decoding(tmp_path, capsys):
+    src = tmp_path / 'a.png'
+    arr = nai_like_rgba(src)
+    Image.fromarray(encode(arr)).save(tmp_path / 'enc.png')              # 隐写随像素被打乱的混淆图
+    assert main([str(tmp_path / 'enc.png')]) == 0
+    assert '已移除 LSB 隐写' in capsys.readouterr().out
+    assert stealth.find(np.asarray(Image.open(tmp_path / 'enc_dec.png'))) is None
+
+
+def test_stealth_kept_with_original(tmp_path, capsys):
+    src = tmp_path / 'a.png'
+    arr = nai_like_rgba(src)
+    assert main(['-e', str(src), '-o']) == 0
+    assert '已保留元数据：LSB 隐写（alpha+gzip' in capsys.readouterr().out
+    assert main([str(tmp_path / 'a_enc.png'), '-o']) == 0
+    dec = np.asarray(Image.open(tmp_path / 'a_enc_dec.png'))
+    assert np.array_equal(dec, arr) and stealth.find(dec) is not None    # 逐像素还原，隐写可读
+    assert main(['-e', str(src), '-o', '--jpeg', '-O', str(tmp_path / 'x.jpg')]) == 0
+    out = capsys.readouterr().out
+    assert 'JPEG 输出无法保留 LSB 隐写（alpha+gzip' in out and '没有可保留' not in out
+
+
+def test_images_without_stealth_round_trip_exactly(tmp_path):
+    src = tmp_path / 'r.png'
+    arr = np.random.default_rng(7).integers(0, 256, (40, 56, 4), dtype=np.uint8)
+    Image.fromarray(arr).save(src)
+    assert main(['-e', str(src)]) == 0
+    assert main([str(tmp_path / 'r_enc.png'), '-f']) == 0               # 随机像素不满足粗糙度校验，用 -f
+    assert np.array_equal(np.asarray(Image.open(tmp_path / 'r_enc_dec.png')), arr)

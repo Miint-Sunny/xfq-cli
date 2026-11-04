@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from . import __version__, metadata
+from . import __version__, metadata, stealth
 from .argparse_zh import ArgumentParser
 from .core import decode, encode, roughness
 from .trash import move_to_trash
@@ -133,7 +133,10 @@ def process_one(src: Path, rel: Path, opts) -> tuple[str, str]:
     """处理单个文件。
 
     结果先写入同目录的临时文件，再移到输出路径。使用 --overwrite 覆盖已有文件时，被覆盖的文件先移到废纸篓，
-    移动失败则不覆盖；不支持废纸篓的系统上直接覆盖。输出默认不含元数据，使用 --original 时保留输入图片的元数据。
+    移动失败则不覆盖；不支持废纸篓的系统上直接覆盖。
+
+    输出默认不含输入图片的元数据，并清除 LSB 隐写；使用 --original 时两者都保留。隐写数据在混淆图中已被打乱，
+    因此在原图顺序的像素上检测：混淆时检测输入，解混淆时检测解混淆后的结果。
 
     Returns:
         (status, line)：status 为 ``ok``、``skip`` 或 ``fail``；line 为报告行。
@@ -152,7 +155,16 @@ def process_one(src: Path, rel: Path, opts) -> tuple[str, str]:
             arr = load_pixels(im)
             meta = metadata.read(im) if opts.original else None
         before = roughness(arr)
-        out = encode(arr) if opts.encode else decode(arr)
+        plain = np.array(arr) if opts.encode else decode(arr)     # 原图顺序的像素，可写
+        st = stealth.find(plain)
+        steps = []
+        if not opts.original:
+            if st:
+                stealth.wipe(plain, st)
+                steps.append(f'已移除 LSB 隐写（{st.describe()}）')
+            if stealth.normalize_opaque_alpha(plain):            # 未识别格式写入 alpha 最低位的数据
+                steps.append('alpha 已恢复为 255')
+        out = encode(plain) if opts.encode else plain
         after = roughness(out)
         change = f'粗糙度 {before:.1f} → {after:.1f}'
         note = ''
@@ -165,16 +177,24 @@ def process_one(src: Path, rel: Path, opts) -> tuple[str, str]:
                                 f'输入可能不是小番茄混淆图（使用 -f 仍写出）')
             note = '（注意：粗糙度未下降，输入可能不是小番茄混淆图，已按 -f 写出）'
         size = f'{arr.shape[1]}×{arr.shape[0]}'
-        save_kw, kept = {}, ''
+        save_kw = {}
         if meta is not None:
             save_kw, dropped = metadata.save_options(meta, 'JPEG' if opts.jpeg is not None else 'PNG')
             items = [x for x in meta.items() if x not in dropped]
-            kept = f'；已保留元数据：{"、".join(items)}' if items else '；输入图片没有可保留的元数据'
+            if st:                               # JPEG 有损且不含 alpha，隐写数据无法保留
+                (dropped if opts.jpeg is not None else items).append(f'LSB 隐写（{st.describe()}）')
+            if items:
+                steps.append(f'已保留元数据：{"、".join(items)}')
+            elif not dropped:
+                steps.append('输入图片没有可保留的元数据')
             if dropped:
-                note += f'（注意：JPEG 不支持 PNG 文本块，未保留{"、".join(dropped)}）'
-        if opts.dry_run:
+                lost = '、'.join(dropped)
+                note += f'（注意：JPEG 输出无法保留{" " if lost[:1].isascii() else ""}{lost}）'
+        done = ''.join(f'；{x}' for x in steps)
+        if opts.dry_run:                         # 操作说明由“已…”改为“将…”
             replace_plan = f'；{_overwrite_text(dst, done=False)}' if dst.exists() else ''
-            return 'ok', f'· {tag}  [试运行] {size}；{change}{kept.replace("已保留", "将保留", 1)}{replace_plan}{note}'
+            planned = ''.join(f'；{x.replace("已", "将", 1)}' for x in steps)
+            return 'ok', f'· {tag}  [试运行] {size}；{change}{planned}{replace_plan}{note}'
         dst.parent.mkdir(parents=True, exist_ok=True)
         result = Image.fromarray(out)
         tmp = dst.with_name(dst.name + '.tmp~')
@@ -199,7 +219,7 @@ def process_one(src: Path, rel: Path, opts) -> tuple[str, str]:
         tmp = None
         replaced = f'；{_overwrite_text(dst, done=True)}' if replacing else ''
         what = '已混淆' if opts.encode else '已解混淆'
-        return 'ok', f'{SYM["ok"]} {tag}  {what} {size}；{change}{kept}{replaced}；{fmt_size(dst.stat().st_size)}{note}'
+        return 'ok', f'{SYM["ok"]} {tag}  {what} {size}；{change}{done}{replaced}；{fmt_size(dst.stat().st_size)}{note}'
     except Exception as e:
         return 'fail', f'{SYM["bad"]} {name}  处理失败：{e}'
     finally:
@@ -224,7 +244,7 @@ EPILOG = f'''\
   xfq -e a.png               混淆，输出 a_enc.png
   xfq -r ./in -d ./out       递归处理目录，结果写入 ./out
   xfq -e *.png --jpeg        混淆并输出 JPEG（质量 95）
-  xfq -e a.png -o            混淆并保留原图的元数据
+  xfq -e a.png -o            混淆并保留原图的元数据与隐写
   xfq a.jpg -n               试运行，只报告粗糙度变化
 
 文档：{REPO_URL}'''
@@ -234,7 +254,7 @@ def build_parser() -> ArgumentParser:
     ap = ArgumentParser(
         prog='xfq',
         description='小番茄图片混淆的命令行工具。默认对输入图片解混淆，使用 -e 时进行混淆。\n'
-                    '默认输出无损 PNG，不含输入图片的元数据；输入为目录或通配符时，处理前请求确认。',
+                    '默认输出无损 PNG，不含输入图片的元数据，并清除 LSB 隐写；输入为目录或通配符时，处理前请求确认。',
         epilog=EPILOG, add_help=False)
     ap.add_argument('paths', nargs='*', metavar='PATH', help='图片文件或目录，支持通配符')
 
@@ -247,7 +267,8 @@ def build_parser() -> ArgumentParser:
     dest.add_argument('-O', '--output', metavar='FILE', help='输出文件，仅适用于单个输入文件')
     dest.add_argument('-d', '--outdir', metavar='DIR', help='输出目录；输入为目录时保留相对路径')
     g.add_argument('-o', '--original', action='store_true',
-                   help='保留原图（输入图片）的元数据：文本块、EXIF、XMP、ICC 色彩配置文件、DPI 和 JPEG 注释（默认：不保留）')
+                   help='保留原图（输入图片）的元数据与 LSB 隐写：文本块、EXIF、XMP、ICC 色彩配置文件、DPI、'
+                        'JPEG 注释与隐写数据（默认：不保留）')
     g.add_argument('--suffix', metavar='SUFFIX', help='输出文件名后缀（默认：解混淆为 _dec，混淆为 _enc）')
     g.add_argument('--jpeg', nargs='?', const=95, type=int, metavar='QUALITY',
                    help='输出 JPEG 而非 PNG，QUALITY 取值 1–100（默认：95）')
