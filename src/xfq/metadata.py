@@ -4,7 +4,7 @@
 可保留的内容：PNG 文本块（tEXt、iTXt、zTXt）、EXIF、XMP、ICC 色彩配置文件、DPI 和 JPEG 注释。
 输出为 JPEG 时无法保存 PNG 文本块，这部分会被略去并在结果中说明。
 
-LSB 隐写等藏在像素中的数据不在此列：它不经过本模块，而是随像素一起被置换，解混淆时随像素一起还原。
+LSB 隐写等藏在像素中的数据不在此列，混淆时的清除与保留见 stealth.py。
 """
 from __future__ import annotations
 
